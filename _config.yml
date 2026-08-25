@@ -1,0 +1,14 @@
+title: Tushar Babbar
+description: Software developer and generally curious person.
+theme: minima
+
+header_pages:
+  - about.md
+  - blog.md
+
+show_excerpts: true
+
+permalink: /blog/:year/:month/:day/:title/
+
+plugins:
+  - jekyll-feed
