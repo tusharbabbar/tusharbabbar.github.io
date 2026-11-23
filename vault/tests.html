@@ -12,7 +12,7 @@
   #log { width: 42%; overflow: auto; padding: 8px 12px; font-family: ui-monospace, Menlo, monospace; font-size: 12px; }
   iframe { flex: 1; border: 0; border-left: 1px solid #333; background: #1e1e1e; }
   .pass { color: #6c6; } .fail { color: #f66; } .skip { color: #aa6; } .sum { font-weight: 700; margin-top: 8px; }
-  @media (max-width: 700px) { #wrap { flex-direction: column-reverse; } #log { width: auto; height: 35vh; } }
+  @media (max-width: 700px) { #wrap { display: block; position: relative; } iframe { position: absolute; inset: 0; width: 100%; height: 100%; } #log { position: absolute; left: 0; right: 0; bottom: 0; width: auto; height: 30vh; background: rgba(0,0,0,.85); z-index: 2; pointer-events: none; } }
 </style>
 </head>
 <body>
@@ -116,6 +116,7 @@ test('typing autosaves to disk', async () => {
 
 test('real keyboard input path (execCommand insertText)', async () => {
   frame.focus(); W.focus(); T.S.editor.view.focus();
+  if (!D.hasFocus()) { typeInEditor('typed for real'); return 'skip'; } // browser window not focused: real key input can't be simulated
   const v = T.S.editor.view; v.dispatch({ selection: { anchor: v.state.doc.length } });
   const ok = D.execCommand('insertText', false, 'typed for real');
   await sleep(700); await saved();
