@@ -228,6 +228,19 @@ test('tags pane lists tags with counts', async () => {
   T.setLeftTab('files');
 });
 
+test('dialogs focus their input synchronously (iOS keyboard rule)', async () => {
+  click($$('.icons button').find((b) => b.title === 'New folder'));
+  const inp = $('.modal input.text');
+  assert(inp && D.activeElement === inp, 'prompt input focused in the same tick');
+  D.dispatchEvent(new W.KeyboardEvent('keydown', { key: 'Escape' }));
+  T.quickSwitcher();
+  const q = $('.modal input.text');
+  assert(q && D.activeElement === q, 'switcher input focused in the same tick');
+  D.dispatchEvent(new W.KeyboardEvent('keydown', { key: 'Escape' }));
+  await sleep(50);
+  assert(!$('.modal'), 'dialogs closed');
+});
+
 test('new folder + context menu new note inside it', async () => {
   click($$('.icons button').find((b) => b.title === 'New folder'));
   await dialogAnswer('Projects');
