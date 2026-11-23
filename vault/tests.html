@@ -1,0 +1,426 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Vault — automated tests</title>
+<style>
+  body { font: 13px/1.4 -apple-system, system-ui, sans-serif; margin: 0; background: #111; color: #ddd; display: flex; flex-direction: column; height: 100vh; }
+  header { padding: 8px 12px; display: flex; gap: 10px; align-items: center; border-bottom: 1px solid #333; }
+  button { font: inherit; padding: 5px 12px; border-radius: 6px; border: 1px solid #444; background: #2a2a2a; color: #eee; cursor: pointer; }
+  #wrap { flex: 1; display: flex; min-height: 0; }
+  #log { width: 42%; overflow: auto; padding: 8px 12px; font-family: ui-monospace, Menlo, monospace; font-size: 12px; }
+  iframe { flex: 1; border: 0; border-left: 1px solid #333; background: #1e1e1e; }
+  .pass { color: #6c6; } .fail { color: #f66; } .skip { color: #aa6; } .sum { font-weight: 700; margin-top: 8px; }
+  @media (max-width: 700px) { #wrap { flex-direction: column-reverse; } #log { width: auto; height: 35vh; } }
+</style>
+</head>
+<body>
+<header><b>Vault tests</b><button id="run">Run all</button><span id="status">ready</span></header>
+<div id="wrap"><div id="log"></div><iframe id="app" title="app under test"></iframe></div>
+<script>
+const logEl = document.getElementById('log');
+const frame = document.getElementById('app');
+const VAULT = '__test__';
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+const results = [];
+window.__results = results;
+let W, D, T; // app window, document, test hook
+
+function line(cls, text) { const d = document.createElement('div'); d.className = cls; d.textContent = text; logEl.append(d); logEl.scrollTop = 1e9; }
+function assert(cond, msg) { if (!cond) throw new Error(msg); }
+const $ = (s) => D.querySelector(s);
+const $$ = (s) => [...D.querySelectorAll(s)];
+async function until(fn, ms = 3000, what = 'condition') {
+  const t0 = Date.now();
+  while (Date.now() - t0 < ms) { try { const v = await fn(); if (v) return v; } catch {} await sleep(40); }
+  throw new Error('timed out waiting for ' + what);
+}
+async function readFile(path) {
+  const root = await W.navigator.storage.getDirectory();
+  let d = await (await root.getDirectoryHandle('vaults')).getDirectoryHandle(VAULT);
+  const parts = path.split('/');
+  for (const p of parts.slice(0, -1)) d = await d.getDirectoryHandle(p);
+  return (await (await d.getFileHandle(parts.at(-1))).getFile()).text();
+}
+async function exists(path) { try { await readFile(path); return true; } catch { return false; } }
+function typeInEditor(text) {
+  const v = T.S.editor.view;
+  const pos = v.state.selection.main.head;
+  v.dispatch({ changes: { from: pos, insert: text }, selection: { anchor: pos + text.length }, userEvent: 'input.type' });
+}
+function setDoc(text) { const v = T.S.editor.view; v.dispatch({ changes: { from: 0, to: v.state.doc.length, insert: text }, selection: { anchor: text.length }, userEvent: 'input.type' }); }
+const treePaths = () => $$('.tree-item').map((e) => e.dataset.path);
+const click = (el) => { assert(el, 'element to click not found'); el.click(); };
+const menuItem = (label) => $$('.ctx button').find((b) => b.textContent === label);
+async function dialogAnswer(value) {
+  const input = await until(() => $('.modal .dialog input.text, .modal .palette input.text'), 2000, 'dialog');
+  input.value = value; input.dispatchEvent(new W.Event('input'));
+  await sleep(30);
+  const form = input.closest('form');
+  if (form) form.requestSubmit(); else input.dispatchEvent(new W.KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));
+  await sleep(150);
+}
+async function saved() { await T.flushSave(); await sleep(150); }
+
+async function loadApp() {
+  frame.src = 'index.html?test=' + Date.now();
+  await new Promise((r) => (frame.onload = r));
+  W = frame.contentWindow; D = W.document;
+  T = await until(() => W.vaultTest, 5000, 'app boot');
+  await until(() => !D.querySelector('#welcome') || D.querySelector('#welcome'), 2000);
+  await sleep(300);
+}
+
+const tests = [];
+const test = (name, fn) => tests.push({ name, fn });
+
+// ------------------------------------------------------------------ tests
+test('fresh test vault opens', async () => {
+  if ((await T.listVaults()).includes(VAULT)) await T.deleteVault(VAULT);
+  for (const k of Object.keys(W.localStorage)) if (k.endsWith('.' + VAULT)) W.localStorage.removeItem(k);
+  await T.openVault(VAULT);
+  assert($('#vault-name').textContent === VAULT, 'vault name shown');
+  assert(!$('#welcome'), 'welcome screen gone');
+  assert($('.empty'), 'empty state shown');
+});
+
+test('new note from toolbar: edit mode, title focused', async () => {
+  T.setMode('preview');
+  click($$('.icons button').find((b) => b.title === 'New note'));
+  await until(() => $('.inline-title')?.value === 'Untitled', 2000, 'Untitled note');
+  assert($('.note-body').classList.contains('mode-source'), 'opens in edit mode');
+  assert(D.activeElement === $('.inline-title'), 'title is focused (got ' + D.activeElement?.className + ')');
+  assert(await exists('Untitled.md'), 'file created');
+});
+
+test('rename via title keeps editor + focus (phone keyboard stays up)', async () => {
+  const t = $('.inline-title');
+  const cm = $('.cm-editor');
+  t.value = 'Alpha';
+  t.dispatchEvent(new W.KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));
+  await sleep(500);
+  assert(await exists('Alpha.md') && !(await exists('Untitled.md')), 'file renamed on disk');
+  assert($('.cm-editor') === cm, 'editor was not rebuilt');
+  assert(cm.contains(D.activeElement), 'focus moved into editor body (got ' + D.activeElement?.className + ')');
+  assert($('#title').textContent === 'Alpha', 'top bar title updated');
+  assert(treePaths().includes('Alpha.md'), 'tree updated');
+});
+
+test('typing autosaves to disk', async () => {
+  typeInEditor('---\ntags: [project]\nstatus: draft\n---\n# Goals\nShip it. Links: [[Beta]] and #work\n## Notes\n- [ ] first task\n- [x] done task\n> [!warning] Careful\n> body text\n==marked== text\n');
+  await sleep(900);
+  const txt = await readFile('Alpha.md');
+  assert(txt.includes('Ship it.') && txt.includes('[!warning]'), 'content on disk');
+});
+
+test('real keyboard input path (execCommand insertText)', async () => {
+  T.S.editor.view.focus();
+  const ok = D.execCommand('insertText', false, 'typed for real');
+  await saved();
+  assert(ok, 'insertText supported');
+  assert((await readFile('Alpha.md')).includes('typed for real'), 'typed text saved');
+});
+
+test('link autocomplete suggests notes', async () => {
+  await T.createNote('Beta.md', 'Beta body. Back to [[Alpha]].\n# Section B\nsection text');
+  await T.openFile('Alpha.md');
+  T.S.editor.view.focus();
+  typeInEditor('\nsee [[Be');
+  await until(() => $('.cm-tooltip-autocomplete li'), 2000, 'autocomplete popup');
+  const opts = $$('.cm-tooltip-autocomplete li').map((l) => l.textContent);
+  assert(opts.some((o) => o.startsWith('Beta')), 'Beta offered: ' + opts);
+  T.S.editor.view.contentDOM.dispatchEvent(new W.KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));
+  await sleep(100);
+  assert(T.S.editor.getText().includes('see [[Beta]]'), 'completion applied: ' + T.S.editor.getText().slice(-20));
+});
+
+test('reading view renders Obsidian markdown', async () => {
+  await saved();
+  T.setMode('preview');
+  await sleep(200);
+  const p = $('.markdown-preview');
+  assert(p.querySelector('.properties') && p.textContent.includes('draft'), 'frontmatter properties');
+  assert(p.querySelector('h1#h-goals'), 'heading with id');
+  assert(p.querySelector('a.internal-link[data-href="Beta"]'), 'wikilink');
+  assert(p.querySelector('a.tag[data-tag="work"]'), 'tag');
+  assert(p.querySelector('.callout[data-callout="warning"]'), 'callout');
+  assert(p.querySelector('mark')?.textContent === 'marked', 'highlight');
+  assert(p.querySelectorAll('input.task').length === 2, 'two tasks');
+});
+
+test('ticking a task in reading view saves', async () => {
+  const box = $$('.markdown-preview input.task')[0];
+  box.click();
+  await saved(); await sleep(400);
+  assert((await readFile('Alpha.md')).includes('- [x] first task'), 'task saved as done');
+});
+
+test('clicking a link opens the note; back/forward work', async () => {
+  click($('.markdown-preview a.internal-link[data-href="Beta"]'));
+  await until(() => $('#title').textContent === 'Beta', 2000, 'Beta open');
+  click($('#back'));
+  await until(() => $('#title').textContent === 'Alpha', 2000, 'back to Alpha');
+  click($('#fwd'));
+  await until(() => $('#title').textContent === 'Beta', 2000, 'forward to Beta');
+});
+
+test('unresolved link creates note in edit mode', async () => {
+  await T.openFile('Alpha.md');
+  T.setMode('source'); setDoc(T.S.editor.getText() + '\nnew: [[Gamma]]\n'); await saved();
+  T.setMode('preview'); await sleep(150);
+  click($('.markdown-preview a.internal-link[data-href="Gamma"]'));
+  await until(() => $('#title').textContent === 'Gamma', 2000, 'Gamma open');
+  assert(await exists('Gamma.md'), 'Gamma.md created');
+  assert($('.note-body').classList.contains('mode-source'), 'new note is editable');
+  assert($('.cm-editor').contains(D.activeElement), 'editor focused');
+});
+
+test('embeds: note section and image', async () => {
+  const png = Uint8Array.from(atob('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg=='), (c) => c.charCodeAt(0));
+  const links = await T.saveAttachments([new W.File([png], 'dot.png', { type: 'image/png' })]);
+  assert(links[0] === '![[dot.png]]', 'attachment link ' + links[0]);
+  await T.createNote('Embeds.md', `![[dot.png]]\n\n![[Beta#Section B]]\n`);
+  await T.openFile('Embeds.md'); T.setMode('preview');
+  const img = await until(() => $('.markdown-preview img[src^="blob:"]'), 2000, 'image blob');
+  await until(() => img.complete && img.naturalWidth === 1, 2000, 'image decoded');
+  const emb = await until(() => $('.markdown-preview .embed-note'), 2000, 'note embed');
+  assert(emb.textContent.includes('section text') && !emb.textContent.includes('Beta body'), 'section-only embed: ' + emb.textContent);
+});
+
+test('paste image into editor saves attachment', async () => {
+  await T.openFile('Gamma.md'); T.setMode('source');
+  const dt = new W.DataTransfer();
+  dt.items.add(new W.File([new Uint8Array([137, 80, 78, 71])], 'image.png', { type: 'image/png' }));
+  T.S.editor.view.contentDOM.dispatchEvent(new W.ClipboardEvent('paste', { clipboardData: dt, bubbles: true, cancelable: true }));
+  await until(() => /!\[\[Pasted image \d+\.png\]\]/.test(T.S.editor.getText()), 2000, 'pasted link');
+  assert([...T.S.vault.files.keys()].some((p) => p.startsWith('Pasted image')), 'pasted file stored');
+});
+
+test('backlinks, outgoing and outline panels', async () => {
+  await T.openFile('Beta.md');
+  D.body.classList.add('right-open');
+  click($$('#right .tabs button').find((b) => b.dataset.tab === 'backlinks'));
+  assert($('#right-body').textContent.includes('Alpha'), 'Alpha links to Beta');
+  click($$('#right .tabs button').find((b) => b.dataset.tab === 'outgoing'));
+  assert($('#right-body').textContent.includes('Alpha'), 'outgoing to Alpha');
+  click($$('#right .tabs button').find((b) => b.dataset.tab === 'outline'));
+  assert($('#right-body').textContent.includes('Section B'), 'outline heading');
+  D.body.classList.remove('right-open');
+});
+
+test('search: text, tag:, path:', async () => {
+  T.showSearch('section text');
+  await until(() => $('#search-results .panel-h')?.textContent.startsWith('1 result'), 2000, 'text result');
+  T.showSearch('tag:#work');
+  await until(() => $('#search-results .sr-file')?.textContent.includes('Alpha'), 2000, 'tag result');
+  T.showSearch('path:gam');
+  await until(() => $('#search-results .sr-file')?.textContent.includes('Gamma'), 2000, 'path result');
+  click($('#search-results .sr-file'));
+  await until(() => $('#title').textContent === 'Gamma', 2000, 'result opens note');
+});
+
+test('tags pane lists tags with counts', async () => {
+  T.setLeftTab('tags');
+  const rows = $$('#tags-pane .tag-row').map((r) => r.textContent);
+  assert(rows.some((r) => r.startsWith('#work')) && rows.some((r) => r.startsWith('#project')), 'tags: ' + rows);
+  T.setLeftTab('files');
+});
+
+test('new folder + context menu new note inside it', async () => {
+  click($$('.icons button').find((b) => b.title === 'New folder'));
+  await dialogAnswer('Projects');
+  await until(() => treePaths().includes('Projects'), 2000, 'folder in tree');
+  const f = $$('.tree-item').find((e) => e.dataset.path === 'Projects');
+  f.dispatchEvent(new W.MouseEvent('contextmenu', { bubbles: true, clientX: 50, clientY: 80 }));
+  click(await until(() => menuItem('New note'), 1000, 'menu'));
+  await until(() => T.S.current === 'Projects/Untitled.md', 2000, 'note in folder');
+});
+
+test('move, duplicate, rename dialog rewrite links', async () => {
+  await T.movePath('Beta.md', 'Projects/Beta.md');
+  assert(await exists('Projects/Beta.md'), 'moved on disk');
+  const a = await readFile('Alpha.md');
+  assert(a.includes('[[Beta]]'), 'link still resolves by name: ' + a.match(/\[\[Beta[^\]]*\]\]/));
+  await T.duplicate('Gamma.md');
+  assert(await exists('Gamma 1.md'), 'duplicate created');
+  const g = $$('.tree-item').find((e) => e.dataset.path === 'Projects/Beta.md');
+  g.dispatchEvent(new W.MouseEvent('contextmenu', { bubbles: true, clientX: 50, clientY: 80 }));
+  click(await until(() => menuItem('Rename…'), 1000, 'menu'));
+  await dialogAnswer('Beta Renamed');
+  await until(async () => exists('Projects/Beta Renamed.md'), 2000, 'renamed');
+  assert((await readFile('Alpha.md')).includes('[[Beta Renamed]]'), 'Alpha link rewritten');
+});
+
+test('drag and drop moves a file into a folder', async () => {
+  const src = $$('.tree-item').find((e) => e.dataset.path === 'Gamma 1.md');
+  const dst = $$('.tree-item').find((e) => e.dataset.path === 'Projects');
+  const dt = new W.DataTransfer();
+  src.dispatchEvent(new W.DragEvent('dragstart', { bubbles: true, dataTransfer: dt }));
+  dst.dispatchEvent(new W.DragEvent('dragover', { bubbles: true, cancelable: true, dataTransfer: dt }));
+  dst.dispatchEvent(new W.DragEvent('drop', { bubbles: true, cancelable: true, dataTransfer: dt }));
+  await until(async () => exists('Projects/Gamma 1.md'), 2000, 'dropped file moved');
+});
+
+test('delete moves to .trash and hides from tree', async () => {
+  const el = $$('.tree-item').find((e) => e.dataset.path === 'Projects/Gamma 1.md');
+  el.dispatchEvent(new W.MouseEvent('contextmenu', { bubbles: true, clientX: 50, clientY: 80 }));
+  click(await until(() => menuItem('Delete'), 1000, 'menu'));
+  click(await until(() => $$('.modal button').find((b) => b.textContent === 'Delete'), 1000, 'confirm'));
+  await until(async () => exists('.trash/Gamma 1.md'), 2000, 'in trash');
+  assert(!treePaths().some((p) => p.startsWith('.trash')), 'trash hidden');
+});
+
+test('quick switcher opens and creates notes', async () => {
+  T.quickSwitcher();
+  await dialogAnswer('alph');
+  await until(() => $('#title').textContent === 'Alpha', 2000, 'opened Alpha');
+  T.quickSwitcher();
+  await dialogAnswer('Delta note');
+  await until(() => T.S.current === 'Delta note.md', 2000, 'created Delta');
+  assert($('.note-body').classList.contains('mode-source'), 'editable');
+});
+
+test('command palette runs a command', async () => {
+  T.commandPalette();
+  await dialogAnswer('toggle reading');
+  assert($('.note-body').classList.contains('mode-preview'), 'reading view toggled');
+  T.setMode('source');
+});
+
+test('daily note', async () => {
+  await T.openDaily();
+  const d = new Date(); const name = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}.md`;
+  assert(T.S.current === name, 'daily note ' + T.S.current);
+  assert(await exists(name), 'on disk');
+});
+
+test('graph view draws nodes', async () => {
+  T.graphView();
+  const c = await until(() => $('canvas.graph'), 2000, 'canvas');
+  await sleep(400);
+  assert($('.graph-head small').textContent.match(/(\d+) notes/)[1] >= 5, 'node count');
+  const px = c.getContext('2d').getImageData(0, 0, c.width, c.height).data;
+  let painted = 0; for (let i = 3; i < px.length; i += 4 * 50) if (px[i]) painted++;
+  assert(painted > 0, 'canvas painted');
+  click($('.graph-head button'));
+});
+
+test('settings: theme switch applies', async () => {
+  await T.settingsDialog();
+  const sel = await until(() => $('.settings select'), 1000, 'settings');
+  sel.value = 'light'; sel.dispatchEvent(new W.Event('change'));
+  assert(D.documentElement.dataset.theme === 'light', 'light theme');
+  sel.value = 'dark'; sel.dispatchEvent(new W.Event('change'));
+  D.dispatchEvent(new W.KeyboardEvent('keydown', { key: 'Escape' }));
+});
+
+test('Obsidian vault import (.zip) into new vault', async () => {
+  const zip = makeZip({
+    'MyObs/Home.md': '# Home\nGo to [[Sub/Page]] and ![[pic.png]] #imported',
+    'MyObs/Sub/Page.md': 'Page body [[Home]]',
+    'MyObs/Assets/pic.png': atob('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg=='),
+    'MyObs/.obsidian/app.json': '{"attachmentFolderPath":"Assets"}',
+    '__MACOSX/MyObs/._Home.md': 'x',
+  });
+  if ((await T.listVaults()).includes('__test_import__')) await T.deleteVault('__test_import__');
+  T.importDialog();
+  const zipIn = await until(() => $$('.modal input[type=file]').find((i) => i.accept.includes('zip')), 1000, 'zip input');
+  const dt = new W.DataTransfer(); dt.items.add(new W.File([zip], 'MyObs.zip', { type: 'application/zip' }));
+  zipIn.files = dt.files; zipIn.dispatchEvent(new W.Event('change'));
+  await dialogAnswer('__test_import__');
+  await until(() => $('.modal h3')?.textContent === 'Import complete', 4000, 'import report');
+  const rep = $('.modal').textContent;
+  assert(rep.includes('2 notes') && rep.includes('1 attachments'), 'report: ' + rep);
+  D.dispatchEvent(new W.KeyboardEvent('keydown', { key: 'Escape' }));
+  assert(T.S.vault.name === '__test_import__', 'switched to imported vault');
+  assert(treePaths().includes('Sub') && treePaths().includes('Home.md'), 'tree: ' + treePaths());
+  assert(T.S.settings.attachmentFolder === 'Assets', 'Obsidian settings applied');
+  await T.openFile('Home.md'); T.setMode('preview');
+  assert($('.markdown-preview a.internal-link[data-href="Sub/Page"]:not(.unresolved)'), 'path link resolves');
+  await until(() => $('.markdown-preview img[src^="blob:"]'), 2000, 'image embed');
+  T.setMode('source');
+  await T.deleteVault('__test_import__');
+  await T.openVault(VAULT);
+});
+
+test('notes persist after reload', async () => {
+  await saved();
+  await T.S.vault.flushMeta();
+  W.localStorage.setItem('vault.last', VAULT);
+  await loadApp();
+  await until(() => $('#vault-name').textContent === VAULT, 3000, 'test vault reopened');
+  assert(treePaths().includes('Alpha.md') && treePaths().includes('Projects'), 'tree restored: ' + treePaths());
+  assert(T.S.notes.get('Alpha.md').includes('typed for real'), 'content restored');
+});
+
+test('mobile: touch toolbar and drawers (touch viewport only)', async () => {
+  if (!W.matchMedia('(pointer: coarse)').matches) return 'skip';
+  await T.openFile('Alpha.md'); T.setMode('source');
+  assert($('.md-toolbar'), 'formatting toolbar present');
+  T.S.editor.view.focus();
+  const before = T.S.editor.getText().length;
+  const tb = $$('.md-toolbar button').find((b) => b.title === 'Task');
+  tb.dispatchEvent(new W.PointerEvent('pointerdown', { bubbles: true, cancelable: true })); tb.click();
+  assert(T.S.editor.getText().length === before + 6, 'toolbar inserted task');
+  assert($('.cm-editor').contains(D.activeElement), 'editor keeps focus after toolbar tap');
+  click($('.topbar button'));
+  await sleep(300);
+  assert(D.body.classList.contains('left-open'), 'drawer opens');
+  click($('#scrim'));
+  assert(!D.body.classList.contains('left-open'), 'scrim closes drawer');
+});
+
+test('cleanup test vault', async () => {
+  await T.deleteVault(VAULT);
+  W.localStorage.removeItem('vault.last');
+});
+
+// ------------------------------------------------------------------ tiny stored-zip writer
+function makeZip(files) {
+  const enc = new TextEncoder(); const parts = []; const cd = []; let off = 0;
+  const crcT = Array.from({ length: 256 }, (_, n) => { let c = n; for (let k = 0; k < 8; k++) c = c & 1 ? 0xedb88320 ^ (c >>> 1) : c >>> 1; return c >>> 0; });
+  const crc = (b) => { let c = -1; for (const x of b) c = crcT[(c ^ x) & 255] ^ (c >>> 8); return (c ^ -1) >>> 0; };
+  for (const [path, content] of Object.entries(files)) {
+    const data = typeof content === 'string' && !/^\x89PNG/.test(content) ? enc.encode(content) : Uint8Array.from(content, (ch) => ch.charCodeAt(0));
+    const name = enc.encode(path); const c = crc(data);
+    const lh = new DataView(new ArrayBuffer(30));
+    lh.setUint32(0, 0x04034b50, true); lh.setUint16(4, 20, true); lh.setUint16(6, 0x800, true); lh.setUint32(14, c, true); lh.setUint32(18, data.length, true); lh.setUint32(22, data.length, true); lh.setUint16(26, name.length, true);
+    parts.push(new Uint8Array(lh.buffer), name, data);
+    const ch = new DataView(new ArrayBuffer(46));
+    ch.setUint32(0, 0x02014b50, true); ch.setUint16(4, 20, true); ch.setUint16(6, 20, true); ch.setUint16(8, 0x800, true); ch.setUint32(16, c, true); ch.setUint32(20, data.length, true); ch.setUint32(24, data.length, true); ch.setUint16(28, name.length, true); ch.setUint32(42, off, true);
+    cd.push(new Uint8Array(ch.buffer), name); off += 30 + name.length + data.length;
+  }
+  const size = cd.reduce((s, p) => s + p.length, 0); const n = Object.keys(files).length;
+  const end = new DataView(new ArrayBuffer(22)); end.setUint32(0, 0x06054b50, true); end.setUint16(8, n, true); end.setUint16(10, n, true); end.setUint32(12, size, true); end.setUint32(16, off, true);
+  return new Blob([...parts, ...cd, new Uint8Array(end.buffer)]);
+}
+
+// ------------------------------------------------------------------ runner
+async function runAll() {
+  results.length = 0; logEl.textContent = '';
+  document.getElementById('status').textContent = 'running…';
+  window.__done = false;
+  try { await loadApp(); } catch (e) { line('fail', 'app failed to load: ' + e.message); window.__done = true; return; }
+  const errs = []; W.addEventListener('error', (e) => errs.push(e.message)); W.addEventListener('unhandledrejection', (e) => errs.push(String(e.reason?.message || e.reason)));
+  for (const t of tests) {
+    try {
+      const r = await t.fn();
+      if (r === 'skip') { results.push({ name: t.name, status: 'skip' }); line('skip', '– ' + t.name + ' (skipped)'); }
+      else { results.push({ name: t.name, status: 'pass' }); line('pass', '✓ ' + t.name); }
+    } catch (e) {
+      results.push({ name: t.name, status: 'fail', error: e.message }); line('fail', '✗ ' + t.name + ' — ' + e.message);
+    }
+    if (W !== frame.contentWindow) { W = frame.contentWindow; D = W.document; W.addEventListener('error', (e) => errs.push(e.message)); }
+  }
+  if (errs.length) { results.push({ name: 'no uncaught page errors', status: 'fail', error: errs.join(' | ') }); line('fail', '✗ uncaught errors: ' + errs.join(' | ')); }
+  const f = results.filter((r) => r.status === 'fail').length, p = results.filter((r) => r.status === 'pass').length;
+  line('sum', `${p} passed, ${f} failed, ${results.length - p - f} skipped`);
+  document.getElementById('status').textContent = f ? `${f} failing` : 'all green';
+  window.__done = true;
+}
+document.getElementById('run').onclick = runAll;
+if (location.hash === '#run') runAll();
+</script>
+</body>
+</html>
