@@ -131,8 +131,11 @@ test('link autocomplete suggests notes', async () => {
   await until(() => $('.cm-tooltip-autocomplete li'), 2000, 'autocomplete popup');
   const opts = $$('.cm-tooltip-autocomplete li').map((l) => l.textContent);
   assert(opts.some((o) => o.startsWith('Beta')), 'Beta offered: ' + opts);
-  T.S.editor.view.contentDOM.dispatchEvent(new W.KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));
-  await sleep(100);
+  // pick the option the way a click/tap does (synthetic key presses are ignored by Firefox)
+  const li = $$('.cm-tooltip-autocomplete li').find((l) => l.textContent.startsWith('Beta'));
+  li.dispatchEvent(new W.MouseEvent('mousedown', { bubbles: true, cancelable: true, button: 0 }));
+  li.dispatchEvent(new W.MouseEvent('click', { bubbles: true, cancelable: true, button: 0 }));
+  await sleep(150);
   assert(T.S.editor.getText().includes('see [[Beta]]'), 'completion applied: ' + T.S.editor.getText().slice(-20));
 });
 
@@ -191,10 +194,20 @@ test('embeds: note section and image', async () => {
 
 test('paste image into editor saves attachment', async () => {
   await T.openFile('Gamma.md'); T.setMode('source');
-  const dt = new W.DataTransfer();
-  dt.items.add(new W.File([new Uint8Array([137, 80, 78, 71])], 'image.png', { type: 'image/png' }));
-  T.S.editor.view.contentDOM.dispatchEvent(new W.ClipboardEvent('paste', { clipboardData: dt, bubbles: true, cancelable: true }));
-  await until(() => /!\[\[Pasted image \d+\.png\]\]/.test(T.S.editor.getText()), 2000, 'pasted link');
+  const file = () => new W.File([new Uint8Array([137, 80, 78, 71])], 'image.png', { type: 'image/png' });
+  const linked = () => /!\[\[Pasted image \d+\.png\]\]/.test(T.S.editor.getText());
+  const dt = new W.DataTransfer(); dt.items.add(file());
+  const ev = new W.ClipboardEvent('paste', { clipboardData: dt, bubbles: true, cancelable: true });
+  let canPaste = ev.clipboardData && ev.clipboardData.files.length > 0;
+  if (canPaste) { T.S.editor.view.contentDOM.dispatchEvent(ev); await until(linked, 2000, 'pasted link'); }
+  else {
+    // this browser can't build a synthetic paste with files (Firefox) — exercise the same path via drop
+    const d2 = new W.DataTransfer(); d2.items.add(file());
+    const drop = new W.DragEvent('drop', { dataTransfer: d2, bubbles: true, cancelable: true, clientX: 10, clientY: 10 });
+    if (!drop.dataTransfer || !drop.dataTransfer.files.length) return 'skip';
+    T.S.editor.view.contentDOM.dispatchEvent(drop);
+    await until(linked, 2000, 'dropped link');
+  }
   assert([...T.S.vault.files.keys()].some((p) => p.startsWith('Pasted image')), 'pasted file stored');
 });
 
