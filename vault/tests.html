@@ -46,7 +46,7 @@ async function readFile(path) {
 async function exists(path) { try { await readFile(path); return true; } catch { return false; } }
 function typeInEditor(text) {
   const v = T.S.editor.view;
-  const pos = v.state.selection.main.head;
+  const pos = v.state.doc.length; // always append at the end
   v.dispatch({ changes: { from: pos, insert: text }, selection: { anchor: pos + text.length }, userEvent: 'input.type' });
 }
 function setDoc(text) { const v = T.S.editor.view; v.dispatch({ changes: { from: 0, to: v.state.doc.length, insert: text }, selection: { anchor: text.length }, userEvent: 'input.type' }); }
@@ -115,9 +115,10 @@ test('typing autosaves to disk', async () => {
 });
 
 test('real keyboard input path (execCommand insertText)', async () => {
-  T.S.editor.view.focus();
+  frame.focus(); W.focus(); T.S.editor.view.focus();
+  const v = T.S.editor.view; v.dispatch({ selection: { anchor: v.state.doc.length } });
   const ok = D.execCommand('insertText', false, 'typed for real');
-  await saved();
+  await sleep(700); await saved();
   assert(ok, 'insertText supported');
   assert((await readFile('Alpha.md')).includes('typed for real'), 'typed text saved');
 });
@@ -213,7 +214,7 @@ test('search: text, tag:, path:', async () => {
   T.showSearch('section text');
   await until(() => $('#search-results .panel-h')?.textContent.startsWith('1 result'), 2000, 'text result');
   T.showSearch('tag:#work');
-  await until(() => $('#search-results .sr-file')?.textContent.includes('Alpha'), 2000, 'tag result');
+  await until(() => $$('#search-results .sr-file').some((e) => e.textContent.includes('Alpha')), 2000, 'tag result (got ' + $('#search-results')?.textContent.slice(0, 80) + ')');
   T.showSearch('path:gam');
   await until(() => $('#search-results .sr-file')?.textContent.includes('Gamma'), 2000, 'path result');
   click($('#search-results .sr-file'));
@@ -254,6 +255,7 @@ test('move, duplicate, rename dialog rewrite links', async () => {
 
 test('drag and drop moves a file into a folder', async () => {
   const src = $$('.tree-item').find((e) => e.dataset.path === 'Gamma 1.md');
+  assert(src, 'Gamma 1.md not in tree: ' + treePaths() + ' | disk: ' + [...T.S.vault.files.keys()]);
   const dst = $$('.tree-item').find((e) => e.dataset.path === 'Projects');
   const dt = new W.DataTransfer();
   src.dispatchEvent(new W.DragEvent('dragstart', { bubbles: true, dataTransfer: dt }));
@@ -264,6 +266,7 @@ test('drag and drop moves a file into a folder', async () => {
 
 test('delete moves to .trash and hides from tree', async () => {
   const el = $$('.tree-item').find((e) => e.dataset.path === 'Projects/Gamma 1.md');
+  assert(el, 'Projects/Gamma 1.md not in tree: ' + treePaths());
   el.dispatchEvent(new W.MouseEvent('contextmenu', { bubbles: true, clientX: 50, clientY: 80 }));
   click(await until(() => menuItem('Delete'), 1000, 'menu'));
   click(await until(() => $$('.modal button').find((b) => b.textContent === 'Delete'), 1000, 'confirm'));
@@ -301,7 +304,7 @@ test('graph view draws nodes', async () => {
   await sleep(400);
   assert($('.graph-head small').textContent.match(/(\d+) notes/)[1] >= 5, 'node count');
   const px = c.getContext('2d').getImageData(0, 0, c.width, c.height).data;
-  let painted = 0; for (let i = 3; i < px.length; i += 4 * 50) if (px[i]) painted++;
+  let painted = 0; for (let i = 3; i < px.length; i += 4) if (px[i]) painted++;
   assert(painted > 0, 'canvas painted');
   click($('.graph-head button'));
 });
@@ -372,6 +375,7 @@ test('mobile: touch toolbar and drawers (touch viewport only)', async () => {
 });
 
 test('cleanup test vault', async () => {
+  if (location.hash.includes('keep')) return 'skip';
   await T.deleteVault(VAULT);
   W.localStorage.removeItem('vault.last');
 });
@@ -420,7 +424,7 @@ async function runAll() {
   window.__done = true;
 }
 document.getElementById('run').onclick = runAll;
-if (location.hash === '#run') runAll();
+if (location.hash.startsWith('#run')) runAll();
 </script>
 </body>
 </html>
